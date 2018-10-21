@@ -6,7 +6,7 @@
 
 Cross-compile for Raspberry Pi:
 
-	`GOARCH=arm GOOS=linux go build`
+	GOARCH=arm GOOS=linux go build
 
 Copy to Pi, then run:
 
