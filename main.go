@@ -103,47 +103,19 @@ func uint8_to_string(bs []uint8) string {
 	return string(ba)
 }
 
-// getImage returns an http handler which returns a JPEG from the specified
-// device file descriptor and memory mapped data buffer
-func getImage(fd int, data []byte) http.Handler {
+var jpegLen uint32
+
+// getJPEG returns an http handler which returns a JPEG from the specified
+// memory mapped data buffer
+func getJPEG(data []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Dequeue buffer
-		qbuf := v4l2_buffer{
-			typ:    V4L2_BUF_TYPE_VIDEO_CAPTURE,
-			memory: V4L2_MEMORY_MMAP,
-			index:  0,
-		}
-		_, _, errno := syscall.Syscall(
-			syscall.SYS_IOCTL,
-			uintptr(fd),
-			uintptr(VIDIOC_DQBUF),
-			uintptr(unsafe.Pointer(&qbuf)),
-		)
-		if errno != 0 {
-			err := string(errno)
-			http.Error(w, err, http.StatusInternalServerError)
-		}
-
-		// Write image
-		w.Write(data[:qbuf.length])
-
-		// Enqueue buffer
-		_, _, errno = syscall.Syscall(
-			syscall.SYS_IOCTL,
-			uintptr(fd),
-			uintptr(VIDIOC_QBUF),
-			uintptr(unsafe.Pointer(&qbuf)),
-		)
-		if errno != 0 {
-			err := string(errno)
-			http.Error(w, err, http.StatusInternalServerError)
-		}
+		w.Write(data[:jpegLen])
 	})
 }
 
-// idleDrain continuously dequeues and re-enqueues buffers. Ensures that
+// framePump continuously dequeues and re-enqueues buffers. Ensures that
 // when getImage is called, the dequeued buffer is the latest available.
-func idleDrain(fd int) error {
+func framePump(fd int) error {
 	for {
 		// Dequeue buffer
 		qbuf := v4l2_buffer{
@@ -160,6 +132,9 @@ func idleDrain(fd int) error {
 		if errno != 0 {
 			return errno
 		}
+
+		// Save buffer size
+		jpegLen = qbuf.length
 
 		// Enqueue buffer
 		_, _, errno = syscall.Syscall(
@@ -275,7 +250,7 @@ func main() {
 	}
 
 	// Driver has additional internal buffer. Drain it to keep it fresh.
-	go idleDrain(dev)
+	go framePump(dev)
 
 	// Stop stream (on shutdown)
 	defer func(fd int, typ *uint32) {
@@ -291,6 +266,6 @@ func main() {
 	}(dev, &buf.typ)
 
 	// Start web server
-	http.Handle("/image.jpg", getImage(dev, data))
+	http.Handle("/image.jpg", getJPEG(data))
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", flagHttpPort), nil))
 }
