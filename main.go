@@ -3,14 +3,17 @@
 
 package main
 
-import "flag"
-import "fmt"
-import "net/http"
-import "log"
-import "syscall"
-import "unsafe"
+import (
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"sync"
+	"syscall"
+	"unsafe"
 
-import "golang.org/x/sys/unix"
+	"golang.org/x/sys/unix"
+)
 
 var flagHttpPort int
 var flagVideoIn string
@@ -103,12 +106,19 @@ func uint8_to_string(bs []uint8) string {
 	return string(ba)
 }
 
+// Ensures multiple readers and one writer use shared memory harmoniously
+var mutex sync.RWMutex
 var jpegLen uint32
 
 // getJPEG returns an http handler which returns a JPEG from the specified
 // memory mapped data buffer
 func getJPEG(data []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Lock for reading (writer may not write at this time)
+		mutex.RLock()
+		defer mutex.RUnlock()
+
+		w.Header().Set("Cache-Control", "no-store")
 		w.Write(data[:jpegLen])
 	})
 }
@@ -116,7 +126,22 @@ func getJPEG(data []byte) http.Handler {
 // framePump continuously dequeues and re-enqueues buffers. Ensures that
 // when getImage is called, the dequeued buffer is the latest available.
 func framePump(fd int) error {
+	// File descriptor set
+	fds := unix.FdSet{}
+
+	// Set bit in set corresponding to file descriptor
+	fds.Bits[fd>>8] |= 1 << (uint(fd) & 63)
+
 	for {
+		// Wait for frame
+		_, err := unix.Select(fd+1, &fds, nil, nil, nil)
+		if err != nil {
+			return err
+		}
+
+		// Lock for writing
+		mutex.Lock()
+
 		// Dequeue buffer
 		qbuf := v4l2_buffer{
 			typ:    V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -130,11 +155,15 @@ func framePump(fd int) error {
 			uintptr(unsafe.Pointer(&qbuf)),
 		)
 		if errno != 0 {
+			mutex.Unlock()
 			return errno
 		}
 
 		// Save buffer size
 		jpegLen = qbuf.length
+
+		// Unlock for readers
+		mutex.Unlock()
 
 		// Enqueue buffer
 		_, _, errno = syscall.Syscall(
@@ -153,7 +182,7 @@ func main() {
 	flag.Parse()
 
 	// Open video device
-	dev, err := unix.Open(flagVideoIn, unix.O_RDWR, 0666)
+	dev, err := unix.Open(flagVideoIn, unix.O_RDWR|unix.O_NONBLOCK, 0666)
 	if err != nil {
 		log.Fatal("Open: ", err)
 	}
