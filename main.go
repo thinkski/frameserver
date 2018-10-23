@@ -160,7 +160,7 @@ func framePump(fd int) error {
 		}
 
 		// Save buffer size
-		jpegLen = qbuf.length
+		jpegLen = qbuf.bytesused
 
 		// Unlock for readers
 		mutex.Unlock()
