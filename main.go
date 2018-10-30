@@ -109,23 +109,24 @@ func uint8_to_string(bs []uint8) string {
 // Ensures multiple readers and one writer use shared memory harmoniously
 var mutex sync.RWMutex
 var jpegLen uint32
+var jpegBuf []byte
 
 // getJPEG returns an http handler which returns a JPEG from the specified
 // memory mapped data buffer
-func getJPEG(data []byte) http.Handler {
+func getJPEG() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Lock for reading (writer may not write at this time)
 		mutex.RLock()
 		defer mutex.RUnlock()
 
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(data[:jpegLen])
+		w.Write(jpegBuf[:jpegLen])
 	})
 }
 
 // framePump continuously dequeues and re-enqueues buffers. Ensures that
 // when getImage is called, the dequeued buffer is the latest available.
-func framePump(fd int) error {
+func framePump(fd int, data []byte) error {
 	// File descriptor set
 	fds := unix.FdSet{}
 
@@ -138,9 +139,6 @@ func framePump(fd int) error {
 		if err != nil {
 			return err
 		}
-
-		// Lock for writing
-		mutex.Lock()
 
 		// Dequeue buffer
 		qbuf := v4l2_buffer{
@@ -155,12 +153,17 @@ func framePump(fd int) error {
 			uintptr(unsafe.Pointer(&qbuf)),
 		)
 		if errno != 0 {
-			mutex.Unlock()
+			//			mutex.Unlock()
 			return errno
 		}
 
+		// Lock for writing
+		mutex.Lock()
+
 		// Save buffer size
 		jpegLen = qbuf.bytesused
+
+		copy(jpegBuf, data)
 
 		// Unlock for readers
 		mutex.Unlock()
@@ -191,8 +194,8 @@ func main() {
 	// Set format
 	pfmt := v4l2_pix_format{
 		typ:         V4L2_BUF_TYPE_VIDEO_CAPTURE,
-		width:       1280,
-		height:      960,
+		width:       3280,
+		height:      2464,
 		pixelformat: V4L2_PIX_FMT_JPEG,
 		field:       V4L2_FIELD_NONE,
 	}
@@ -251,6 +254,13 @@ func main() {
 	}
 	defer unix.Munmap(data)
 
+	// Create a buffer. This buffer:
+	// * May be used by multiple http clients simultaneously
+	// * Lockable by a read-write mutex to ensure not written while read
+	// * Minimized http request latency. Requests do not block waiting for
+	//   a frame, only dequeuing frame.
+	jpegBuf = make([]byte, len(data))
+
 	// Enqueue an initial buffer
 	qbuf := v4l2_buffer{
 		typ:    V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -279,7 +289,7 @@ func main() {
 	}
 
 	// Driver has additional internal buffer. Drain it to keep it fresh.
-	go framePump(dev)
+	go framePump(dev, data)
 
 	// Stop stream (on shutdown)
 	defer func(fd int, typ *uint32) {
@@ -295,6 +305,6 @@ func main() {
 	}(dev, &buf.typ)
 
 	// Start web server
-	http.Handle("/image.jpg", getJPEG(data))
+	http.Handle("/image.jpg", getJPEG())
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", flagHttpPort), nil))
 }
