@@ -11,3 +11,7 @@ Cross-compile for Raspberry Pi:
 Copy to Pi, then run:
 
 	./frameserver
+
+View images via:
+
+	http://<ip address>:8000/image.jpg
